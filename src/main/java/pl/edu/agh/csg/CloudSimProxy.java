@@ -361,6 +361,18 @@ public class CloudSimProxy {
         return cpuPercentUsage;
     }
 
+    public double[] getVmStorageUsage() {
+        List<Vm> input = broker.getVmExecList();
+        double[] storagePercentUsage = new double[input.size()];
+        int i = 0;
+        for (Vm vm : input) {
+            storagePercentUsage[i] = vm.getStorage().getPercentUtilization();
+            i++;
+        }
+
+        return storagePercentUsage;
+    }
+
     public int getSubmittedJobsCountLastInterval() {
         return toAddJobId - previousIntervalJobId;
     }

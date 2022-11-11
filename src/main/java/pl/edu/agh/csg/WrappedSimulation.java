@@ -24,6 +24,8 @@ public class WrappedSimulation {
             "vmAllocatedRatioHistory",
             "avgCPUUtilizationHistory",
             "p90CPUUtilizationHistory",
+            "avgStorageUtilizationHistory",
+            "p90StorageUtilizationHistory",
             "avgMemoryUtilizationHistory",
             "p90MemoryUtilizationHistory",
             "waitingJobsRatioGlobalHistory",
@@ -95,6 +97,8 @@ public class WrappedSimulation {
                 metricsStorage.metricValuesAsPrimitives("vmAllocatedRatioHistory"),
                 metricsStorage.metricValuesAsPrimitives("avgCPUUtilizationHistory"),
                 metricsStorage.metricValuesAsPrimitives("p90CPUUtilizationHistory"),
+                metricsStorage.metricValuesAsPrimitives("avgStorageUtilizationHistory"),
+                metricsStorage.metricValuesAsPrimitives("p90StorageUtilizationHistory"),
                 metricsStorage.metricValuesAsPrimitives("avgMemoryUtilizationHistory"),
                 metricsStorage.metricValuesAsPrimitives("p90MemoryUtilizationHistory"),
                 metricsStorage.metricValuesAsPrimitives("waitingJobsRatioGlobalHistory"),
@@ -219,6 +223,9 @@ public class WrappedSimulation {
         double[] cpuPercentUsage = cloudSimProxy.getVmCpuUsage();
         Arrays.sort(cpuPercentUsage);
 
+        double[] storagePercentUsage = cloudSimProxy.getVmStorageUsage();
+        Arrays.sort(storagePercentUsage);
+
         double[] memPercentageUsage = cloudSimProxy.getVmMemoryUsage();
         Arrays.sort(memPercentageUsage);
 
@@ -228,6 +235,8 @@ public class WrappedSimulation {
         metricsStorage.updateMetric("vmAllocatedRatioHistory", getVmAllocatedRatio());
         metricsStorage.updateMetric("avgCPUUtilizationHistory", safeMean(cpuPercentUsage));
         metricsStorage.updateMetric("p90CPUUtilizationHistory", percentileWithDefault(cpuPercentUsage, 0.90, 0));
+        metricsStorage.updateMetric("avgStorageUtilizationHistory", safeMean(storagePercentUsage));
+        metricsStorage.updateMetric("p90StorageUtilizationHistory", percentileWithDefault(storagePercentUsage, 0.90, 0));
         metricsStorage.updateMetric("avgMemoryUtilizationHistory", safeMean(memPercentageUsage));
         metricsStorage.updateMetric("p90MemoryUtilizationHistory", percentileWithDefault(memPercentageUsage, 0.90, 0));
         metricsStorage.updateMetric("waitingJobsRatioGlobalHistory", waitingJobsRatioGlobal);
@@ -261,6 +270,8 @@ public class WrappedSimulation {
                 metricsStorage.getLastMetricValue("vmAllocatedRatioHistory"),
                 metricsStorage.getLastMetricValue("avgCPUUtilizationHistory"),
                 metricsStorage.getLastMetricValue("p90CPUUtilizationHistory"),
+                metricsStorage.getLastMetricValue("avgStorageUtilizationHistory"),
+                metricsStorage.getLastMetricValue("p90StorageUtilizationHistory"),
                 metricsStorage.getLastMetricValue("avgMemoryUtilizationHistory"),
                 metricsStorage.getLastMetricValue("p90MemoryUtilizationHistory"),
                 metricsStorage.getLastMetricValue("waitingJobsRatioGlobalHistory"),
