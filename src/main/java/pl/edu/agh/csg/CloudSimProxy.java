@@ -1,25 +1,22 @@
 package pl.edu.agh.csg;
 
 import org.cloudbus.cloudsim.allocationpolicies.VmAllocationPolicySimple;
-import org.cloudbus.cloudsim.brokers.DatacenterBroker;
-import org.cloudbus.cloudsim.brokers.DatacenterBrokerSimple;
 import org.cloudbus.cloudsim.cloudlets.Cloudlet;
 import org.cloudbus.cloudsim.cloudlets.CloudletExecution;
 import org.cloudbus.cloudsim.core.CloudSim;
 import org.cloudbus.cloudsim.core.CloudSimTags;
 import org.cloudbus.cloudsim.core.events.SimEvent;
 import org.cloudbus.cloudsim.datacenters.Datacenter;
-import org.cloudbus.cloudsim.datacenters.DatacenterSimple;
 import org.cloudbus.cloudsim.hosts.Host;
-import org.cloudbus.cloudsim.hosts.HostSimple;
 import org.cloudbus.cloudsim.provisioners.PeProvisionerSimple;
 import org.cloudbus.cloudsim.provisioners.ResourceProvisionerSimple;
 import org.cloudbus.cloudsim.resources.Pe;
 import org.cloudbus.cloudsim.resources.PeSimple;
-import org.cloudbus.cloudsim.schedulers.cloudlet.CloudletSchedulerSpaceShared;
 import org.cloudbus.cloudsim.schedulers.vm.VmSchedulerTimeShared;
 import org.cloudbus.cloudsim.vms.Vm;
 import org.cloudbus.cloudsim.vms.VmSimple;
+import org.cloudsimplus.listeners.CloudletVmEventInfo;
+import org.cloudsimplus.listeners.EventListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,13 +24,16 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class CloudSimProxy {
 
@@ -43,7 +43,7 @@ public class CloudSimProxy {
 
     private static final Logger logger = LoggerFactory.getLogger(CloudSimProxy.class.getName());
 
-    private final DatacenterBroker broker;
+    private final DatacenterBrokerFirstFitFixed broker;
     private final CloudSim cloudSim;
     private final SimulationSettings settings;
     private final VmCost vmCost;
@@ -54,6 +54,7 @@ public class CloudSimProxy {
     private final List<Cloudlet> jobs = new ArrayList<>();
     private final List<Cloudlet> potentiallyWaitingJobs = new ArrayList<>(1024);
     private final List<Cloudlet> alreadyStarted = new ArrayList<>(128);
+    private final Set<Long> finishedIds = new HashSet<>();
     private int toAddJobId = 0;
     private int previousIntervalJobId = 0;
     private int nextVmId;
@@ -63,7 +64,7 @@ public class CloudSimProxy {
                          List<Cloudlet> inputJobs,
                          double simulationSpeedUp) {
         this.settings = settings;
-        this.cloudSim = new CloudSim(0.1);
+        this.cloudSim = new CloudSim(0.01);
         this.broker = createDatacenterBroker();
         this.datacenter = createDatacenter();
         this.vmCost = new VmCost(settings.getVmRunningHourlyCost(),
@@ -90,6 +91,14 @@ public class CloudSimProxy {
         this.runFor(0.1);
     }
 
+    public boolean allJobsFinished() {
+        return this.finishedIds.size() == this.jobs.size();
+    }
+
+    public int getFinishedCount() {
+        return finishedIds.size();
+    }
+
     private void scheduleAdditionalCloudletProcessingEvent(final List<Cloudlet> jobs) {
         // a second after every cloudlet will be submitted we add an event - this should prevent
         // the simulation from ending while we have some jobs to schedule
@@ -114,7 +123,7 @@ public class CloudSimProxy {
             final long hostBw = settings.getHostBw();
             final long hostSize = settings.getHostSize();
             Host host =
-                    new HostSimple(hostRam, hostBw, hostSize, peList)
+                    new HostWithoutCreatedList(hostRam, hostBw, hostSize, peList)
                             .setRamProvisioner(new ResourceProvisionerSimple())
                             .setBwProvisioner(new ResourceProvisionerSimple())
                             .setVmScheduler(new VmSchedulerTimeShared());
@@ -122,7 +131,7 @@ public class CloudSimProxy {
             hostList.add(host);
         }
 
-        return new DatacenterSimple(cloudSim, hostList, new VmAllocationPolicySimple());
+        return new LoggingDatacenter(cloudSim, hostList, new VmAllocationPolicySimple());
     }
 
     private List<? extends Vm> createVmList(int vmCount, String type) {
@@ -148,7 +157,7 @@ public class CloudSimProxy {
                 .setRam(settings.getBasicVmRam() * sizeMultiplier)
                 .setBw(settings.getBasicVmBw())
                 .setSize(settings.getBasicVmSize())
-                .setCloudletScheduler(new CloudletScheduler())
+                .setCloudletScheduler(new OptimizedCloudletScheduler())
                 .setDescription(type);
         vmCost.notifyCreateVM(vm);
         return vm;
@@ -180,8 +189,9 @@ public class CloudSimProxy {
         return peList;
     }
 
-    private DatacenterBrokerSimple createDatacenterBroker() {
-        return new DatacenterBrokerSimple(cloudSim);
+    private DatacenterBrokerFirstFitFixed createDatacenterBroker() {
+        // this should be first fit
+        return new DatacenterBrokerFirstFitFixed(cloudSim);
     }
 
     public void runFor(final double interval) {
@@ -241,7 +251,7 @@ public class CloudSimProxy {
         // TODO: can be removed after validating the fix of OOM
         // should always be zero
         final int debugBrokerCreatedListSize = this.broker.getCloudletCreatedList().size();
-        logger.info("runFor took " + diff + "ns / " + diffInSec + "s (DEBUG: " + debugBrokerCreatedListSize + ")");
+        logger.info("runFor (" + this.clock() + ") took " + diff + "ns / " + diffInSec + "s (DEBUG: " + debugBrokerCreatedListSize + ")");
     }
 
     private boolean shouldPrintJobStats() {
@@ -249,14 +259,14 @@ public class CloudSimProxy {
     }
 
     private void printJobStatsAfterEndOfSimulation() {
-        if (!cloudSim.isRunning()) {
+        if (!this.isRunning()) {
             logger.info("End of simulation, some reality check stats:");
 
             printJobStats();
         }
     }
 
-    private void printJobStats() {
+    public void printJobStats() {
         logger.info("All jobs: " + this.jobs.size());
         Map<Cloudlet.Status, Integer> countByStatus = new HashMap<>();
         for (Cloudlet c : this.jobs) {
@@ -270,25 +280,38 @@ public class CloudSimProxy {
         }
 
         logger.info("Jobs which are still queued");
-        for(Cloudlet c : this.jobs) {
-            if(Cloudlet.Status.QUEUED.equals(c.getStatus())) {
-                logger.info("Cloudlet: " + c.getId());
-                logger.info("Number of PEs: " + c.getNumberOfPes());
-                logger.info("Number of MIPS: " + c.getLength());
-                logger.info("Submission delay: " + c.getSubmissionDelay());
-                final Vm vm = c.getVm();
-                logger.info("VM: " + vm.getId() + "(" + vm.getDescription() + ")"
-                        + " CPU: " + vm.getNumberOfPes() +"/" + vm.getMips() +  " @ " + vm.getCpuPercentUtilization()
-                        + " RAM: " + vm.getRam().getAllocatedResource());
+        for(Cloudlet cloudlet : this.jobs) {
+            if(Cloudlet.Status.QUEUED.equals(cloudlet.getStatus())) {
+                printCloudlet(cloudlet);
             }
         }
+        logger.info("Jobs which are still executed");
+        for(Cloudlet cloudlet : this.jobs) {
+            if(Cloudlet.Status.INEXEC.equals(cloudlet.getStatus())) {
+                printCloudlet(cloudlet);
+            }
+        }
+    }
+
+    private void printCloudlet(Cloudlet cloudlet) {
+        logger.info("Cloudlet: " + cloudlet.getId());
+        logger.info("Number of PEs: " + cloudlet.getNumberOfPes());
+        logger.info("Number of MIPS: " + cloudlet.getLength());
+        logger.info("Submission delay: " + cloudlet.getSubmissionDelay());
+        logger.info("Started: " + cloudlet.getExecStartTime());
+        final Vm vm = cloudlet.getVm();
+        logger.info("VM: " + vm.getId() + "(" + vm.getDescription() + ")"
+                + " CPU: " + vm.getNumberOfPes() + "/" + vm.getMips() + " @ " + vm.getCpuPercentUtilization()
+                + " RAM: " + vm.getRam().getAllocatedResource()
+                + " Start time: " + vm.getStartTime()
+                + " Stop time: " + vm.getStopTime());
     }
 
     private void cancelInvalidEvents() {
         final long clock = (long) cloudSim.clock();
 
         if (clock % 100 == 0) {
-            logger.warn("Cleaning up events (before): " + getNumberOfFutureEvents());
+            logger.debug("Cleaning up events (before): " + getNumberOfFutureEvents());
             cloudSim.cancelAll(datacenter, new Predicate<SimEvent>() {
 
                 private SimEvent previous;
@@ -310,7 +333,7 @@ public class CloudSimProxy {
                     return false;
                 }
             });
-            logger.warn("Cleaning up events (after): " + getNumberOfFutureEvents());
+            logger.debug("Cleaning up events (after): " + getNumberOfFutureEvents());
         }
     }
 
@@ -318,26 +341,54 @@ public class CloudSimProxy {
         previousIntervalJobId = nextVmId;
         List<Cloudlet> jobsToSubmit = new ArrayList<>();
 
-        long addedMips = 0;
         while (toAddJobId < this.jobs.size() && this.jobs.get(toAddJobId).getSubmissionDelay() <= target) {
             // we process every cloudlet only once here...
             final Cloudlet cloudlet = this.jobs.get(toAddJobId);
 
             // the job shold enter the cluster once target is crossed
             cloudlet.setSubmissionDelay(1.0);
+            cloudlet.addOnFinishListener(new EventListener<CloudletVmEventInfo>() {
+                @Override
+                public void update(CloudletVmEventInfo info) {
+                    logger.debug("Cloudlet: " + cloudlet.getId() + "/" + cloudlet.getVm().getId()
+                            + " Finished.");
+                    finishedIds.add(info.getCloudlet().getId());
+                }
+            });
             jobsToSubmit.add(cloudlet);
-            addedMips += cloudlet.getTotalLength();
             toAddJobId++;
         }
 
         if (jobsToSubmit.size() > 0) {
-            broker.submitCloudletList(jobsToSubmit);
+            submitCloudletsList(jobsToSubmit);
             potentiallyWaitingJobs.addAll(jobsToSubmit);
         }
+
+        int pctSubmitted = (int) ((toAddJobId / (double) this.jobs.size()) * 10000d);
+        int upper = pctSubmitted / 100;
+        int lower = pctSubmitted % 100;
+        logger.info(
+                "Simulation progress: submitted: " + upper + "." + lower + "% "
+                        + "Waiting list size: " + this.broker.getCloudletWaitingList().size());
+    }
+
+    private void submitCloudletsList(List<Cloudlet> jobsToSubmit) {
+        logger.debug("Submitting: " + jobsToSubmit.size() + " jobs");
+        broker.submitCloudletList(jobsToSubmit);
+
+        // we immediately clear up that list because it is not really
+        // used anywhere but traversing it takes a lot of time
+        broker.getCloudletSubmittedList().clear();
     }
 
     public boolean isRunning() {
-        return cloudSim.isRunning();
+        // if we don't have unfinished jobs, it doesn't make sense to execute
+        // any actions
+        return cloudSim.isRunning() && hasUnfinishedJobs();
+    }
+
+    private boolean hasUnfinishedJobs() {
+        return this.finishedIds.size() < this.jobs.size();
     }
 
     public long getNumberOfActiveCores() {
@@ -444,16 +495,42 @@ public class CloudSimProxy {
         return size > 0;
     }
 
+    private Cloudlet resetCloudlet(Cloudlet cloudlet) {
+        cloudlet.setVm(Vm.NULL);
+        return cloudlet.reset();
+    }
+
+    private List<Cloudlet> resetCloudlets(List<CloudletExecution> cloudlets) {
+        return cloudlets
+                .stream()
+                .map(CloudletExecution::getCloudlet)
+                .map(this::resetCloudlet)
+                .collect(Collectors.toList());
+    }
+
     private void destroyVm(Vm vm) {
         final String vmSize = vm.getDescription();
-        final List<Cloudlet> affectedCloudlets = this.broker.destroyVm(vm);
+
+        // TODO: okazało się, że jak czyścimy submitted list to chyba "zapominamy" jakieś cloudlety wykonać
+        // wydaje mi się, że jest po prostu jakaś lista w schedulerze o jakiej zapominamy i trzeba
+
+        // replaces broker.destroyVm
+        final List<Cloudlet> affectedExecCloudlets = resetCloudlets(vm.getCloudletScheduler().getCloudletExecList());
+        final List<Cloudlet> affectedWaitingGloudlets = resetCloudlets(vm.getCloudletScheduler().getCloudletWaitingList());
+        final List<Cloudlet> affectedCloudlets = Stream.concat(affectedExecCloudlets.stream(), affectedWaitingGloudlets.stream()).collect(Collectors.toList());
+        vm.getHost().destroyVm(vm);
+        vm.getCloudletScheduler().clear();
+        // replaces broker.destroyVm
+
         logger.debug("Killing VM: "
                 + vm.getId()
                 + " to reschedule cloudlets: "
                 + affectedCloudlets.size()
                 + " type: "
                 + vmSize);
-        rescheduleCloudlets(affectedCloudlets);
+        if(affectedCloudlets.size() > 0) {
+            rescheduleCloudlets(affectedCloudlets);
+        }
     }
 
     private void rescheduleCloudlets(List<Cloudlet> affectedCloudlets) {
@@ -476,9 +553,12 @@ public class CloudSimProxy {
             cloudlet.setSubmissionDelay(submissionDelay);
         });
 
-        broker.submitCloudletList(affectedCloudlets);
+        long brokerStart = System.nanoTime();
+        submitCloudletsList(affectedCloudlets);
+        long brokerStop = System.nanoTime();
 
-        scheduleAdditionalCloudletProcessingEvent(affectedCloudlets);
+        double brokerTime = (brokerStop - brokerStart) / 1_000_000_000d;
+        logger.debug("Rescheduling " + affectedCloudlets.size() + " cloudlets took (s): " + brokerTime);
     }
 
     public double clock() {
@@ -495,37 +575,6 @@ public class CloudSimProxy {
 
     public double getRunningCost() {
         return vmCost.getVMCostPerIteration(this.clock());
-    }
-
-    class CloudletScheduler extends CloudletSchedulerSpaceShared {
-        @Override
-        public double updateProcessing(double currentTime, List<Double> mipsShare) {
-            final int sizeBefore = this.getCloudletWaitingList().size();
-            final double nextSimulationTime = super.updateProcessing(currentTime, mipsShare);
-            final int sizeAfter = this.getCloudletWaitingList().size();
-
-            // if we have a new cloudlet being processed, schedule another recalculation, which should trigger a proper
-            // estimation of end time
-            if (sizeAfter != sizeBefore && Double.MAX_VALUE == nextSimulationTime) {
-                return this.getVm().getSimulation().getMinTimeBetweenEvents();
-            }
-
-            return nextSimulationTime;
-        }
-
-        @Override
-        protected Optional<CloudletExecution> findSuitableWaitingCloudlet() {
-            if (getVm().getProcessor().getAvailableResource() > 0) {
-                final List<CloudletExecution> cloudletWaitingList = getCloudletWaitingList();
-                for (CloudletExecution cle : cloudletWaitingList) {
-                    if (this.isThereEnoughFreePesForCloudlet(cle)) {
-                        return Optional.of(cle);
-                    }
-                }
-            }
-
-            return Optional.empty();
-        }
     }
 
     class DelayCloudletComparator implements Comparator<Cloudlet> {
